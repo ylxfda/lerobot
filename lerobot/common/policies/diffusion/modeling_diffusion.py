@@ -14,10 +14,53 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
+"""
+Diffusion Policy 扩散策略实现
+Diffusion Policy Implementation
 
-TODO(alexander-soare):
-  - Remove reliance on diffusers for DDPMScheduler and LR scheduler.
+论文 (Paper): Diffusion Policy: Visuomotor Policy Learning via Action Diffusion
+链接 (Link): https://arxiv.org/abs/2303.04137
+原始代码 (Original Code): https://github.com/real-stanford/diffusion_policy
+
+功能说明 (Functionality):
+    Diffusion Policy 将动作预测建模为扩散生成过程。
+    通过迭代去噪过程,从随机噪声生成机器人动作序列。
+
+    主要特点:
+    1. 生成建模 (Generative Modeling): 使用扩散模型生成动作
+    2. 多模态分布 (Multimodal Distribution): 能够表示复杂的动作分布
+    3. 时序平滑 (Temporal Smoothing): 自然产生平滑的动作序列
+    4. 视觉条件 (Visual Conditioning): 基于图像观测生成动作
+    5. DDPM/DDIM 采样 (DDPM/DDIM Sampling): 支持不同的扩散采样方法
+
+    Diffusion Policy models action prediction as a diffusion generative process.
+    Generates robot action sequences from random noise through iterative denoising.
+
+    Key Features:
+    1. Generative Modeling: Uses diffusion models to generate actions
+    2. Multimodal Distribution: Can represent complex action distributions
+    3. Temporal Smoothing: Naturally produces smooth action sequences
+    4. Visual Conditioning: Generates actions conditioned on image observations
+    5. DDPM/DDIM Sampling: Supports different diffusion sampling methods
+
+核心思想 (Core Idea):
+    训练阶段 (Training):
+        从真实动作开始,逐步添加高斯噪声,学习逆向去噪过程
+        Start from real actions, progressively add Gaussian noise, learn reverse denoising
+
+    推理阶段 (Inference):
+        从随机噪声开始,迭代去噪 T 步,生成最终动作序列
+        Start from random noise, iteratively denoise for T steps, generate final action sequence
+
+架构组件 (Architecture Components):
+    - DiffusionPolicy: 主策略类 / Main policy class
+    - DiffusionModel: 核心扩散模型 / Core diffusion model
+    - ConditionalUnet1D: 条件 U-Net 网络 / Conditional U-Net network
+    - DDPMScheduler/DDIMScheduler: 扩散调度器 / Diffusion schedulers
+
+TODO:
+    - 移除对 diffusers 库的依赖,使用自定义调度器
+    - Remove reliance on diffusers for DDPMScheduler and LR scheduler
 """
 
 import math
@@ -47,12 +90,46 @@ from lerobot.common.policies.utils import (
 
 class DiffusionPolicy(PreTrainedPolicy):
     """
-    Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
-    (paper: https://arxiv.org/abs/2303.04137, code: https://github.com/real-stanford/diffusion_policy).
+    Diffusion Policy 扩散策略
+    Diffusion Policy
+
+    论文 (Paper): "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
+    链接 (Link): https://arxiv.org/abs/2303.04137
+    代码 (Code): https://github.com/real-stanford/diffusion_policy
+
+    工作原理 (How it Works):
+        1. 训练 (Training):
+           - 对真实动作序列逐步添加高斯噪声(正向扩散)
+           - 学习网络预测并移除噪声(逆向去噪)
+           - Progressively add Gaussian noise to real action sequences (forward diffusion)
+           - Learn network to predict and remove noise (reverse denoising)
+
+        2. 推理 (Inference):
+           - 从纯随机噪声开始 / Start from pure random noise
+           - 基于观测条件,迭代去噪 T 步 / Iteratively denoise for T steps conditioned on observations
+           - 最终得到平滑的动作序列 / Finally obtain smooth action sequence
+
+    输入 (Inputs):
+        - observation.state: 机器人状态 / Robot state
+          形状 (Shape): (batch, n_obs_steps, state_dim)
+        - observation.images: 图像观测(可选) / Image observations (optional)
+          形状 (Shape): List of (batch, n_obs_steps, C, H, W)
+        - observation.environment_state: 环境状态(可选) / Environment state (optional)
+          形状 (Shape): (batch, n_obs_steps, env_state_dim)
+
+    输出 (Outputs):
+        - 预测动作序列 / Predicted action sequence
+          形状 (Shape): (batch, horizon, action_dim)
+
+    关键超参数 (Key Hyperparameters):
+        - num_diffusion_iters: 扩散步数 T(如 100) / Number of diffusion steps T (e.g., 100)
+        - horizon: 动作序列长度(如 16) / Action sequence length (e.g., 16)
+        - n_obs_steps: 观测历史长度(如 2) / Observation history length (e.g., 2)
+        - n_action_steps: 执行的动作数(如 8) / Number of actions to execute (e.g., 8)
     """
 
-    config_class = DiffusionConfig
-    name = "diffusion"
+    config_class = DiffusionConfig  # 配置类 / Configuration class
+    name = "diffusion"              # 策略名称 / Policy name
 
     def __init__(
         self,
@@ -60,11 +137,23 @@ class DiffusionPolicy(PreTrainedPolicy):
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         """
-        Args:
-            config: Policy configuration class instance or None, in which case the default instantiation of
-                the configuration class is used.
-            dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
-                that they will be passed with a call to `load_state_dict` before the policy is used.
+        初始化 Diffusion Policy (Initialize Diffusion Policy)
+
+        参数说明 (Parameters):
+            config (DiffusionConfig):
+                策略配置实例 / Policy configuration instance
+                主要配置项 (Key config items):
+                - num_diffusion_iters: 扩散迭代次数 / Number of diffusion iterations
+                - horizon: 预测动作的时间范围 / Horizon for action prediction
+                - n_obs_steps: 观测步数 / Number of observation steps
+                - n_action_steps: 动作执行步数 / Number of action execution steps
+                - input_features: 输入特征列表 / List of input features
+                - output_features: 输出特征列表 / List of output features
+
+            dataset_stats (dict[str, dict[str, Tensor]] | None):
+                数据集统计信息用于归一化 / Dataset statistics for normalization
+                结构 (Structure): {feature_name: {"mean": Tensor, "std": Tensor}}
+                如未传入,期望通过 load_state_dict 传入 / If not passed, expected via load_state_dict
         """
         super().__init__(config)
         config.validate_features()

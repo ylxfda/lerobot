@@ -14,11 +14,53 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Implementation of Finetuning Offline World Models in the Real World.
+"""
+TDMPC (Temporal Difference Model Predictive Control) 策略实现
+TDMPC (Temporal Difference Model Predictive Control) Policy Implementation
 
-The comments in this code may sometimes refer to these references:
-    TD-MPC paper: Temporal Difference Learning for Model Predictive Control (https://arxiv.org/abs/2203.04955)
-    FOWM paper: Finetuning Offline World Models in the Real World (https://arxiv.org/abs/2310.16029)
+论文参考 (Paper References):
+    TD-MPC: Temporal Difference Learning for Model Predictive Control
+    链接 (Link): https://arxiv.org/abs/2203.04955
+
+    FOWM: Finetuning Offline World Models in the Real World
+    链接 (Link): https://arxiv.org/abs/2310.16029
+
+功能说明 (Functionality):
+    TDMPC 是一种模型基础的强化学习方法,结合了:
+    1. 世界模型 (World Model): 学习环境动态
+    2. 模型预测控制 (MPC): 基于世界模型规划动作
+    3. 时序差分学习 (TD Learning): 学习价值函数
+
+    主要特点:
+    - 端到端可训练的世界模型和策略
+    - 使用隐式规划进行动作选择
+    - 支持视觉和状态输入
+    - 在线微调能力
+
+    TDMPC is a model-based RL method combining:
+    1. World Model: Learns environment dynamics
+    2. Model Predictive Control: Plans actions using world model
+    3. Temporal Difference Learning: Learns value function
+
+    Key Features:
+    - End-to-end trainable world model and policy
+    - Uses implicit planning for action selection
+    - Supports visual and state inputs
+    - Online fine-tuning capability
+
+注意事项 (Important Notes):
+    - 已验证从 FOWM 原始代码移植的预训练权重
+    - 尚未验证在 LeRobot 上训练能否复现 FOWM 结果
+    - 已验证可在 PushT 任务上训练
+    - 当前 xarm 数据集使用 FOWM 环境生成,与 LeRobot xarm 环境不匹配
+
+    - Verified evaluation of pretrained weights from FOWM original code
+    - NOT verified that training on LeRobot reproduces FOWM results
+    - Verified training works for PushT task
+    - Current xarm datasets generated with FOWM environment, don't match LeRobot xarm env
+
+代码注释中可能引用这些参考文献
+The comments in this code may sometimes refer to these references
 """
 
 # ruff: noqa: N806

@@ -12,8 +12,145 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Contains logic to instantiate a robot, read information from its motors and cameras,
-and send orders to its motors.
+"""
+机械臂机器人控制模块 (Manipulator Robot Control Module)
+
+功能说明 (Functionality):
+    实现机械臂机器人的完整控制逻辑,包括电机控制、相机采集和遥操作。
+    支持主从式(leader-follower)遥操作和策略控制。
+
+    Implements complete control logic for manipulator robots, including motor control,
+    camera capture, and teleoperation. Supports leader-follower teleoperation and policy control.
+
+核心特性 (Core Features):
+    1. 主从式遥操作 (Leader-Follower Teleoperation): 主臂引导从臂运动
+    2. 数据采集 (Data Collection): 同步采集电机状态和相机图像
+    3. 策略控制 (Policy Control): 执行训练好的策略动作
+    4. 安全保护 (Safety Protection): 限制电机最大移动范围
+
+支持机器人 (Supported Robots):
+    - Aloha: 双臂操作机器人 / Bi-manual manipulation robot
+    - Koch v1.0/v1.1: 低成本机械臂 / Low-cost manipulator
+    - 其他基于 Dynamixel/Feetech 舵机的机械臂 / Other Dynamixel/Feetech-based manipulators
+
+主要类 (Main Class):
+    - ManipulatorRobot: 机械臂机器人主控制类 / Main manipulator robot control class
+
+使用流程 (Usage Workflow):
+    1. 创建机器人实例 / Create robot instance
+    2. 连接设备(电机、相机) / Connect devices (motors, cameras)
+    3. 遥操作或策略控制 / Teleoperation or policy control
+    4. 断开连接 / Disconnect
+
+基础示例 (Basic Example):
+    ```python
+    from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
+    from lerobot.common.robot_devices.robots.configs import KochRobotConfig
+
+    # 创建机器人 / Create robot
+    robot = ManipulatorRobot(KochRobotConfig())
+
+    # 连接设备 / Connect devices
+    robot.connect()
+
+    # 遥操作采集数据 / Teleoperation data collection
+    while True:
+        observation, action = robot.teleop_step(record_data=True)
+        # observation 包含相机图像和电机状态 / Contains camera images and motor states
+        # action 是主臂的位置 / Is leader arm positions
+
+    # 断开连接 / Disconnect
+    robot.disconnect()
+    ```
+
+策略控制示例 (Policy Control Example):
+    ```python
+    # 假设已有训练好的策略 / Assuming trained policy exists
+    policy = load_policy("path/to/checkpoint")
+
+    robot = ManipulatorRobot(config)
+    robot.connect()
+
+    while True:
+        # 采集观测 / Capture observation
+        observation = robot.capture_observation()
+
+        # 策略推理 / Policy inference
+        with torch.inference_mode():
+            action = policy.select_action(observation)
+
+        # 执行动作 / Execute action
+        robot.send_action(action)
+    ```
+
+自定义电机配置 (Custom Motor Configuration):
+    ```python
+    from lerobot.common.robot_devices.motors.configs import DynamixelMotorsBusConfig
+
+    # 自定义主臂电机 / Custom leader arm motors
+    leader_arms = {
+        "main": DynamixelMotorsBusConfig(
+            port="/dev/ttyUSB0",
+            motors={
+                "shoulder_pan": (1, "xl330-m077"),
+                "shoulder_lift": (2, "xl330-m077"),
+                "elbow_flex": (3, "xl330-m077"),
+                "wrist_flex": (4, "xl330-m077"),
+                "wrist_roll": (5, "xl330-m077"),
+                "gripper": (6, "xl330-m077"),
+            },
+        ),
+    }
+
+    # 自定义从臂电机 / Custom follower arm motors
+    follower_arms = {
+        "main": DynamixelMotorsBusConfig(
+            port="/dev/ttyUSB1",
+            motors={
+                "shoulder_pan": (1, "xl430-w250"),
+                "shoulder_lift": (2, "xl430-w250"),
+                "elbow_flex": (3, "xl330-m288"),
+                "wrist_flex": (4, "xl330-m288"),
+                "wrist_roll": (5, "xl330-m288"),
+                "gripper": (6, "xl330-m288"),
+            },
+        ),
+    }
+
+    robot = ManipulatorRobot(
+        KochRobotConfig(leader_arms=leader_arms, follower_arms=follower_arms)
+    )
+    ```
+
+自定义相机配置 (Custom Camera Configuration):
+    ```python
+    from lerobot.common.robot_devices.cameras.configs import OpenCVCameraConfig
+
+    cameras = {
+        "top": OpenCVCameraConfig(camera_index=0, fps=30, width=640, height=480),
+        "wrist": OpenCVCameraConfig(camera_index=1, fps=30, width=640, height=480),
+    }
+
+    robot = ManipulatorRobot(KochRobotConfig(cameras=cameras))
+    ```
+
+安全特性 (Safety Features):
+    - max_relative_target: 限制单步最大移动量,防止电机突然大幅运动
+    - 位置范围检查: 确保目标位置在安全范围内
+    - 扭矩保护: 检测异常负载
+
+    - max_relative_target: Limits max single-step movement to prevent sudden large motions
+    - Position range check: Ensures target positions are within safe bounds
+    - Torque protection: Detects abnormal loads
+
+注意事项 (Notes):
+    - 首次使用前需要进行电机校准 / Motor calibration required before first use
+    - 建议先用主臂遥操作测试,确认安全后再启用从臂
+    - 遥操作时注意周围环境安全
+
+    - Motor calibration required before first use
+    - Recommend testing with leader arm first, then enable follower after confirming safety
+    - Be aware of surrounding safety during teleoperation
 """
 # TODO(rcadene, aliberts): reorganize the codebase into one file per robot, with the associated
 # calibration procedure, to make it easy for people to add their own robot.

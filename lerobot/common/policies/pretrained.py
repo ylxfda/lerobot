@@ -11,6 +11,35 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+预训练策略基类模块 (Pretrained Policy Base Class Module)
+
+功能说明 (Functionality):
+    定义所有策略模型的基类 PreTrainedPolicy。
+    提供统一的接口用于:
+    - 策略模型的保存和加载 (Save and load policy models)
+    - HuggingFace Hub 集成 (HuggingFace Hub integration)
+    - 配置管理 (Configuration management)
+    - Safetensors 格式序列化 (Safetensors format serialization)
+
+    所有具体策略(ACT, Diffusion, TDMPC等)都继承自这个基类。
+    All concrete policies (ACT, Diffusion, TDMPC, etc.) inherit from this base class.
+
+主要类 (Main Classes):
+    PreTrainedPolicy: 策略模型的抽象基类 / Abstract base class for policy models
+
+使用模式 (Usage Pattern):
+    1. 子类必须定义 config_class 和 name 类属性
+    2. 实现 forward() 方法定义前向传播
+    3. 使用 from_pretrained() 加载预训练模型
+    4. 使用 save_pretrained() 保存模型到 Hub
+
+    1. Subclasses must define config_class and name class attributes
+    2. Implement forward() method to define forward pass
+    3. Use from_pretrained() to load pretrained models
+    4. Use save_pretrained() to save models to Hub
+"""
+
 import abc
 import logging
 import os
@@ -29,15 +58,21 @@ from torch import Tensor, nn
 from lerobot.common.utils.hub import HubMixin
 from lerobot.configs.policies import PreTrainedConfig
 
+# 类型变量,用于类型提示 / Type variable for type hints
 T = TypeVar("T", bound="PreTrainedPolicy")
 
+# 默认的策略模型卡片模板 / Default policy model card template
+# 用于在推送模型到 Hub 时生成 README.md
+# Used to generate README.md when pushing model to Hub
 DEFAULT_POLICY_CARD = """
 ---
-# For reference on model card metadata, see the spec: https://github.com/huggingface/hub-docs/blob/main/modelcard.md?plain=1
-# Doc / guide: https://huggingface.co/docs/hub/model-cards
+# 模型卡片元数据参考规范 / For reference on model card metadata spec
+# https://github.com/huggingface/hub-docs/blob/main/modelcard.md?plain=1
+# 文档/指南 / Doc / guide: https://huggingface.co/docs/hub/model-cards
 {{ card_data }}
 ---
 
+此策略使用 [LeRobot](https://github.com/huggingface/lerobot) 推送到 Hub:
 This policy has been pushed to the Hub using [LeRobot](https://github.com/huggingface/lerobot):
 - Docs: {{ docs_url | default("[More Information Needed]", true) }}
 """
@@ -45,11 +80,58 @@ This policy has been pushed to the Hub using [LeRobot](https://github.com/huggin
 
 class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
     """
-    Base class for policy models.
+    策略模型的基类 (Base Class for Policy Models)
+
+    功能说明 (Functionality):
+        所有 LeRobot 策略模型的抽象基类。继承自:
+        - nn.Module: PyTorch 模型基类
+        - HubMixin: 提供 HuggingFace Hub 集成功能
+        - abc.ABC: 抽象基类,强制子类实现特定方法
+
+        Abstract base class for all LeRobot policy models. Inherits from:
+        - nn.Module: PyTorch model base class
+        - HubMixin: Provides HuggingFace Hub integration
+        - abc.ABC: Abstract base class, enforces subclass implementation
+
+    必需的类属性 (Required Class Attributes):
+        config_class (Type[PreTrainedConfig]): 对应的配置类
+                                              例如: ACTConfig, DiffusionConfig
+                                              Corresponding configuration class
+                                              e.g., ACTConfig, DiffusionConfig
+
+        name (str): 策略名称,用于识别和加载
+                   例如: "act", "diffusion", "tdmpc"
+                   Policy name for identification and loading
+                   e.g., "act", "diffusion", "tdmpc"
+
+    主要方法 (Main Methods):
+        __init__(config): 初始化策略 / Initialize policy
+        forward(batch): 前向传播(抽象方法,子类必须实现) / Forward pass (abstract, must implement)
+        from_pretrained(path): 从预训练权重加载 / Load from pretrained weights
+        save_pretrained(path): 保存模型到目录/Hub / Save model to directory/Hub
+
+    使用示例 (Usage Example):
+        ```python
+        # 定义新策略 / Define new policy
+        class MyPolicy(PreTrainedPolicy):
+            config_class = MyPolicyConfig
+            name = "my_policy"
+
+            def forward(self, batch):
+                # 实现前向传播 / Implement forward pass
+                return output
+
+        # 从预训练模型加载 / Load from pretrained
+        policy = MyPolicy.from_pretrained("username/my_policy")
+
+        # 保存模型 / Save model
+        policy.save_pretrained("./my_policy")
+        ```
     """
 
-    config_class: None
-    name: None
+    # 类属性:子类必须重写 / Class attributes: must be overridden by subclasses
+    config_class: None  # 配置类类型 / Configuration class type
+    name: None          # 策略名称 / Policy name
 
     def __init__(self, config: PreTrainedConfig, *inputs, **kwargs):
         super().__init__()

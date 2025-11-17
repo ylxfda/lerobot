@@ -13,7 +13,80 @@
 # limitations under the License.
 
 """
-This file contains utilities for recording frames from cameras. For more info look at `OpenCVCamera` docstring.
+OpenCV 相机控制模块 (OpenCV Camera Control Module)
+
+功能说明 (Functionality):
+    基于 OpenCV 实现通用 USB 相机的图像采集和录制。
+    支持单相机和多相机同步采集,异步读取优化性能。
+
+    Implements image capture and recording for generic USB cameras based on OpenCV.
+    Supports single and multi-camera synchronous capture with async read for performance.
+
+主要特性 (Key Features):
+    1. 相机自动发现 (Camera Auto-Discovery): 扫描系统中所有可用相机
+    2. 异步读取 (Async Read): 后台线程持续采集,降低延迟
+    3. 图像旋转 (Image Rotation): 支持90°, 180°, -90°旋转
+    4. 性能日志 (Performance Logging): 记录帧率和时间戳
+
+核心类 (Core Classes):
+    - OpenCVCamera: 单相机控制类 / Single camera control class
+    - find_cameras(): 发现系统中的相机 / Discover cameras in system
+    - save_images_from_cameras(): 批量保存图像 / Batch save images
+
+使用示例 (Usage Example):
+    ```python
+    from lerobot.common.robot_devices.cameras.opencv import OpenCVCamera
+    from lerobot.common.robot_devices.cameras.configs import OpenCVCameraConfig
+
+    # 创建并连接相机 / Create and connect camera
+    config = OpenCVCameraConfig(camera_index=0, fps=30, width=640, height=480)
+    camera = OpenCVCamera(config)
+    camera.connect()
+
+    # 同步读取(阻塞到新帧) / Synchronous read (blocks until new frame)
+    image = camera.read()  # shape: (480, 640, 3), dtype: uint8
+
+    # 异步读取(立即返回最新帧) / Async read (returns latest frame immediately)
+    image = camera.async_read()
+
+    # 断开连接 / Disconnect
+    camera.disconnect()
+    ```
+
+多相机示例 (Multi-Camera Example):
+    ```python
+    from lerobot.common.robot_devices.cameras.opencv import find_cameras
+
+    # 发现所有相机 / Find all cameras
+    cameras = find_cameras()  # [{'port': '/dev/video0', 'index': 0}, ...]
+
+    # 创建多个相机实例 / Create multiple camera instances
+    camera_instances = []
+    for cam_info in cameras:
+        config = OpenCVCameraConfig(camera_index=cam_info['index'], fps=30)
+        camera = OpenCVCamera(config)
+        camera.connect()
+        camera_instances.append(camera)
+
+    # 同步采集所有相机 / Synchronously capture all cameras
+    images = [cam.async_read() for cam in camera_instances]
+    ```
+
+性能优化 (Performance Optimization):
+    - async_read() 使用后台线程持续采集,避免帧延迟
+    - 支持硬件加速(依赖 OpenCV 编译选项)
+    - 多线程并行采集多相机
+
+    - async_read() uses background thread for continuous capture to avoid frame delay
+    - Supports hardware acceleration (depends on OpenCV compile options)
+    - Multi-threaded parallel capture for multiple cameras
+
+平台兼容性 (Platform Compatibility):
+    - Linux: 自动扫描 /dev/video* 设备
+    - Mac/Windows: 扫描索引 0-59
+
+    - Linux: Auto scans /dev/video* devices
+    - Mac/Windows: Scans indices 0-59
 """
 
 import argparse

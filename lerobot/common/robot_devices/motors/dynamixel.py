@@ -11,6 +11,78 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Dynamixel 舵机总线控制模块 (Dynamixel Motor Bus Control Module)
+
+功能说明 (Functionality):
+    实现与 Dynamixel 系列舵机的底层通信和控制。
+    Dynamixel 是 Robotis 公司生产的智能舵机,广泛应用于机器人领域。
+
+    主要功能:
+    1. 舵机通信 (Motor Communication): 通过串口与舵机进行同步读写
+    2. 位置校准 (Position Calibration): 将原始位置值转换为标准度数范围
+    3. 批量操作 (Batch Operations): 使用 GroupSyncRead/Write 提高效率
+    4. 错误处理 (Error Handling): 自动重试和校准纠正
+
+    Implements low-level communication and control for Dynamixel series motors.
+    Dynamixel motors are smart servos produced by Robotis, widely used in robotics.
+
+    Key features:
+    1. Motor Communication: Synchronous read/write via serial port
+    2. Position Calibration: Convert raw position values to standard degree range
+    3. Batch Operations: Use GroupSyncRead/Write for efficiency
+    4. Error Handling: Auto retry and calibration correction
+
+支持型号 (Supported Models):
+    - XL330-M077, XL330-M288: 小型舵机 / Compact motors
+    - XL430-W250: 中型舵机 / Medium motors
+    - XM430-W350, XM540-W270: 大型舵机 / Large motors
+    - XC430-W150: 协作机器人舵机 / Collaborative robot motors
+
+通信协议 (Communication Protocol):
+    - Protocol Version: 2.0
+    - Baudrate: 1,000,000 bps
+    - Control Table: 舵机内存映射表,定义所有可读写参数
+                     Motor memory map table defining all readable/writable parameters
+
+使用示例 (Usage Example):
+    ```python
+    from lerobot.common.robot_devices.motors.configs import DynamixelMotorsBusConfig
+    from lerobot.common.robot_devices.motors.dynamixel import DynamixelMotorsBus
+
+    # 配置舵机总线 / Configure motor bus
+    config = DynamixelMotorsBusConfig(
+        port="/dev/ttyUSB0",
+        motors={
+            "shoulder": (1, "xl430-w250"),  # (ID, 型号/model)
+            "elbow": (2, "xl430-w250"),
+            "gripper": (3, "xl330-m288"),
+        }
+    )
+
+    # 创建并连接 / Create and connect
+    motors_bus = DynamixelMotorsBus(config)
+    motors_bus.connect()
+
+    # 读取当前位置 / Read current position
+    positions = motors_bus.read("Present_Position")  # 返回度数 / Returns degrees
+
+    # 写入目标位置 / Write goal position
+    motors_bus.write("Goal_Position", positions + 10.0)  # 移动10度 / Move 10 degrees
+
+    # 断开连接 / Disconnect
+    motors_bus.disconnect()
+    ```
+
+校准系统 (Calibration System):
+    舵机原始位置值是无符号32位整数 [0, 2^32),需要校准到标准范围:
+    - 旋转关节 (Revolute): [-180°, 180°] 度数
+    - 线性关节 (Linear): [0%, 100%] 百分比(如夹爪)
+
+    Raw motor position is unsigned 32-bit int [0, 2^32), needs calibration to:
+    - Revolute joints: [-180°, 180°] degrees
+    - Linear joints: [0%, 100%] percentage (e.g., gripper)
+"""
 
 import enum
 import logging
@@ -268,42 +340,88 @@ class JointOutOfRangeError(Exception):
 
 class DynamixelMotorsBus:
     """
-    The DynamixelMotorsBus class allows to efficiently read and write to the attached motors. It relies on
-    the python dynamixel sdk to communicate with the motors. For more info, see the [Dynamixel SDK Documentation](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_sdk/sample_code/python_read_write_protocol_2_0/#python-read-write-protocol-20).
+    Dynamixel 舵机总线管理类 (Dynamixel Motor Bus Manager Class)
 
-    A DynamixelMotorsBus instance requires a port (e.g. `DynamixelMotorsBus(port="/dev/tty.usbmodem575E0031751"`)).
-    To find the port, you can run our utility script:
-    ```bash
-    python lerobot/scripts/find_motors_bus_port.py
-    >>> Finding all available ports for the MotorBus.
-    >>> ['/dev/tty.usbmodem575E0032081', '/dev/tty.usbmodem575E0031751']
-    >>> Remove the usb cable from your DynamixelMotorsBus and press Enter when done.
-    >>> The port of this DynamixelMotorsBus is /dev/tty.usbmodem575E0031751.
-    >>> Reconnect the usb cable.
-    ```
+    功能说明 (Functionality):
+        管理连接到一个串口的多个 Dynamixel 舵机。
+        提供高效的批量读写接口,自动处理校准和错误重试。
 
-    Example of usage for 1 motor connected to the bus:
-    ```python
-    motor_name = "gripper"
-    motor_index = 6
-    motor_model = "xl330-m288"
+        Manages multiple Dynamixel motors connected to a single serial port.
+        Provides efficient batch read/write interfaces with auto calibration and error retry.
 
-    config = DynamixelMotorsBusConfig(
-        port="/dev/tty.usbmodem575E0031751",
-        motors={motor_name: (motor_index, motor_model)},
-    )
-    motors_bus = DynamixelMotorsBus(config)
-    motors_bus.connect()
+    核心特性 (Core Features):
+        1. 同步通信 (Sync Communication): 使用 GroupSyncRead/Write 批量操作多个舵机
+        2. 位置校准 (Position Calibration): 自动转换原始位置到标准度数范围
+        3. 自动纠错 (Auto Correction): 检测并修正超出范围的位置值
+        4. 性能日志 (Performance Logging): 记录每次读写操作的时间戳和耗时
 
-    position = motors_bus.read("Present_Position")
+    属性说明 (Attributes):
+        port (str):
+            串口路径 / Serial port path
+            示例 (Example): "/dev/ttyUSB0" (Linux), "COM3" (Windows)
 
-    # move from a few motor steps as an example
-    few_steps = 30
-    motors_bus.write("Goal_Position", position + few_steps)
+        motors (dict[str, tuple[int, str]]):
+            舵机配置字典 / Motor configuration dictionary
+            结构 (Structure): {舵机名称: (舵机ID, 舵机型号) / {motor_name: (motor_id, motor_model)}
+            示例 (Example): {"shoulder": (1, "xl430-w250"), "elbow": (2, "xl430-w250")}
 
-    # when done, consider disconnecting
-    motors_bus.disconnect()
-    ```
+        mock (bool):
+            是否使用模拟模式(用于测试) / Whether to use mock mode (for testing)
+            默认值 (Default): False
+
+        calibration (dict | None):
+            校准参数字典 / Calibration parameters dictionary
+            包含 (Contains): homing_offset, drive_mode, start_pos, end_pos 等
+
+        is_connected (bool):
+            是否已连接 / Whether connected
+
+        group_readers (dict):
+            GroupSyncRead 对象缓存 / GroupSyncRead object cache
+
+        group_writers (dict):
+            GroupSyncWrite 对象缓存 / GroupSyncWrite object cache
+
+        logs (dict):
+            性能日志数据 / Performance log data
+
+    使用示例 (Usage Example):
+        ```python
+        # 单舵机示例 / Single motor example
+        motor_name = "gripper"
+        motor_index = 6
+        motor_model = "xl330-m288"
+
+        config = DynamixelMotorsBusConfig(
+            port="/dev/tty.usbmodem575E0031751",
+            motors={motor_name: (motor_index, motor_model)},
+        )
+        motors_bus = DynamixelMotorsBus(config)
+        motors_bus.connect()
+
+        position = motors_bus.read("Present_Position")
+
+        # 移动几个舵机步数作为示例 / Move a few motor steps as example
+        few_steps = 30
+        motors_bus.write("Goal_Position", position + few_steps)
+
+        # 完成后断开连接 / Disconnect when done
+        motors_bus.disconnect()
+        ```
+
+    串口查找 (Port Discovery):
+        运行实用脚本查找串口 / Run utility script to find port:
+        ```bash
+        python lerobot/scripts/find_motors_bus_port.py
+        >>> Finding all available ports for the MotorBus.
+        >>> ['/dev/tty.usbmodem575E0032081', '/dev/tty.usbmodem575E0031751']
+        >>> Remove the usb cable from your DynamixelMotorsBus and press Enter when done.
+        >>> The port of this DynamixelMotorsBus is /dev/tty.usbmodem575E0031751.
+        >>> Reconnect the usb cable.
+        ```
+
+    参考文档 (Reference Documentation):
+        Dynamixel SDK: https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_sdk/
     """
 
     def __init__(
@@ -435,18 +553,79 @@ class DynamixelMotorsBus:
         return values
 
     def apply_calibration(self, values: np.ndarray | list, motor_names: list[str] | None):
-        """Convert from unsigned int32 joint position range [0, 2**32[ to the universal float32 nominal degree range ]-180.0, 180.0[ with
-        a "zero position" at 0 degree.
+        """
+        应用校准转换位置值 (Apply Calibration to Convert Position Values)
 
-        Note: We say "nominal degree range" since the motors can take values outside this range. For instance, 190 degrees, if the motor
-        rotate more than a half a turn from the zero position. However, most motors can't rotate more than 180 degrees and will stay in this range.
+        功能说明 (Functionality):
+            将舵机原始位置值(无符号32位整数)转换为标准化的度数或百分比。
+            这是舵机控制中最关键的步骤之一,统一不同舵机的坐标系。
 
-        Joints values are original in [0, 2**32[ (unsigned int32). Each motor are expected to complete a full rotation
-        when given a goal position that is + or - their resolution. For instance, dynamixel xl330-m077 have a resolution of 4096, and
-        at any position in their original range, let's say the position 56734, they complete a full rotation clockwise by moving to 60830,
-        or anticlockwise by moving to 52638. The position in the original range is arbitrary and might change a lot between each motor.
-        To harmonize between motors of the same model, different robots, or even models of different brands, we propose to work
-        in the centered nominal degree range ]-180, 180[.
+            Converts raw motor position values (unsigned 32-bit int) to standardized degrees or percentages.
+            This is one of the most critical steps in motor control, unifying coordinate systems across different motors.
+
+        校准过程 (Calibration Process):
+            对于旋转关节 (For Revolute Joints):
+            1. 应用驱动模式(反转方向) / Apply drive mode (reverse direction)
+            2. 加上归零偏移 / Add homing offset
+            3. 缩放到 [-180°, 180°] 范围 / Scale to [-180°, 180°] range
+
+            对于线性关节 (For Linear Joints):
+            1. 使用起始和结束位置 / Use start and end positions
+            2. 线性映射到 [0%, 100%] 范围 / Linear map to [0%, 100%] range
+
+        原理说明 (Principle Explanation):
+            舵机原始位置在 [0, 2^32) 范围内(无符号int32)。
+            每个舵机完成一整圈旋转需要移动其分辨率大小的步数。
+            例如,xl330-m077 分辨率为 4096,在任意位置(如 56734),
+            顺时针旋转一圈到 60830 (56734 + 4096),
+            逆时针旋转一圈到 52638 (56734 - 4096)。
+
+            原始位置范围是任意的,不同舵机差异很大。
+            为了统一不同型号舵机、不同机器人,我们采用标准范围:
+            - 旋转关节: [-180°, 180°] (以0度为中心的半圈范围)
+            - 线性关节: [0%, 100%] (如夹爪开合度)
+
+            Raw motor positions are in [0, 2^32) range (unsigned int32).
+            Each motor completes a full rotation by moving its resolution steps.
+            For example, xl330-m077 has resolution 4096, at any position (e.g., 56734),
+            clockwise full rotation to 60830 (56734 + 4096),
+            counterclockwise to 52638 (56734 - 4096).
+
+            Raw position range is arbitrary and varies greatly between motors.
+            To unify different motor models and robots, we use standard ranges:
+            - Revolute joints: [-180°, 180°] (half rotation centered at 0 degrees)
+            - Linear joints: [0%, 100%] (e.g., gripper opening)
+
+        参数说明 (Parameters):
+            values (np.ndarray | list):
+                原始位置值数组 / Raw position value array
+                形状 (Shape): (len(motor_names),)
+                数据类型 (Dtype): uint32 或 int32
+
+            motor_names (list[str] | None):
+                要校准的舵机名称列表 / Motor names to calibrate
+                None 表示校准所有舵机 / None means calibrate all motors
+
+        返回值 (Returns):
+            values (np.ndarray):
+                校准后的位置值 / Calibrated position values
+                形状 (Shape): (len(motor_names),)
+                数据类型 (Dtype): float32
+                单位 (Units):
+                - 旋转关节: 度数 [-180°, 180°] / Degrees for revolute
+                - 线性关节: 百分比 [0%, 100%] / Percentage for linear
+
+        异常 (Raises):
+            JointOutOfRangeError: 如果校准后值超出允许范围
+                                  If calibrated value exceeds allowed range
+                - 旋转关节: [-270°, 270°] 最大范围 / Max range for revolute
+                - 线性关节: [-10%, 110%] 最大范围 / Max range for linear
+
+        注意事项 (Notes):
+            - "标称度数范围"指舵机可以超出 [-180°, 180°],例如 190°
+              表示从零位旋转超过半圈。但大多数舵机不能旋转超过180度。
+            - "Nominal degree range" means motors can exceed [-180°, 180°], e.g., 190°
+              means rotating more than half turn from zero. But most motors can't exceed 180°.
         """
         if motor_names is None:
             motor_names = self.motor_names
@@ -683,6 +862,65 @@ class DynamixelMotorsBus:
             return values[0]
 
     def read(self, data_name, motor_names: str | list[str] | None = None):
+        """
+        从舵机读取数据 (Read Data from Motors)
+
+        功能说明 (Functionality):
+            使用 GroupSyncRead 批量读取一个或多个舵机的指定数据。
+            自动应用校准转换和错误重试机制。
+
+            Uses GroupSyncRead to batch read specified data from one or more motors.
+            Automatically applies calibration conversion and error retry mechanism.
+
+        参数说明 (Parameters):
+            data_name (str):
+                要读取的数据名称,必须在 Control Table 中定义
+                Data name to read, must be defined in Control Table
+                常用值 (Common values):
+                - "Present_Position": 当前位置 / Current position
+                - "Present_Velocity": 当前速度 / Current velocity
+                - "Present_Current": 当前电流 / Current current
+                - "Present_Temperature": 当前温度 / Current temperature
+
+            motor_names (str | list[str] | None):
+                要读取的舵机名称列表 / Motor names to read
+                None 表示读取所有舵机 / None means read all motors
+                示例 (Example): ["shoulder", "elbow"] 或 "gripper"
+
+        返回值 (Returns):
+            values (np.ndarray):
+                读取的数据值数组 / Array of read data values
+                形状 (Shape): (len(motor_names),)
+                数据类型 (Dtype): float32 (校准后) or int32 (原始值)
+                对于位置数据,返回校准后的度数或百分比
+                For position data, returns calibrated degrees or percentages
+
+        异常 (Raises):
+            RobotDeviceNotConnectedError: 如果未连接 / If not connected
+            ConnectionError: 如果通信失败 / If communication fails
+            JointOutOfRangeError: 如果校准后值超出范围 / If calibrated value out of range
+
+        使用示例 (Usage Example):
+            ```python
+            # 读取所有舵机当前位置 / Read all motors' current position
+            positions = motors_bus.read("Present_Position")  # shape: (num_motors,)
+
+            # 读取特定舵机温度 / Read specific motor temperature
+            temp = motors_bus.read("Present_Temperature", "shoulder")  # shape: (1,)
+
+            # 读取多个舵机速度 / Read multiple motors' velocity
+            velocities = motors_bus.read("Present_Velocity", ["shoulder", "elbow"])
+            ```
+
+        性能说明 (Performance Notes):
+            - 首次读取会创建 GroupSyncRead 对象并缓存
+            - 后续读取复用缓存的对象,提高效率
+            - 通信时间记录在 self.logs 中
+
+            - First read creates GroupSyncRead object and caches it
+            - Subsequent reads reuse cached object for efficiency
+            - Communication time recorded in self.logs
+        """
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
                 f"DynamixelMotorsBus({self.port}) is not connected. You need to run `motors_bus.connect()`."
@@ -785,6 +1023,69 @@ class DynamixelMotorsBus:
             )
 
     def write(self, data_name, values: int | float | np.ndarray, motor_names: str | list[str] | None = None):
+        """
+        向舵机写入数据 (Write Data to Motors)
+
+        功能说明 (Functionality):
+            使用 GroupSyncWrite 批量向一个或多个舵机写入指定数据。
+            自动将校准后的值转换回原始舵机值。
+
+            Uses GroupSyncWrite to batch write specified data to one or more motors.
+            Automatically converts calibrated values back to raw motor values.
+
+        参数说明 (Parameters):
+            data_name (str):
+                要写入的数据名称,必须在 Control Table 中定义
+                Data name to write, must be defined in Control Table
+                常用值 (Common values):
+                - "Goal_Position": 目标位置 / Goal position
+                - "Goal_Velocity": 目标速度 / Goal velocity
+                - "Goal_Current": 目标电流 / Goal current
+                - "Torque_Enable": 扭矩使能 / Torque enable
+
+            values (int | float | np.ndarray):
+                要写入的值 / Values to write
+                类型 (Types):
+                - int/float: 单个值,广播到所有舵机 / Single value, broadcast to all motors
+                - np.ndarray: 每个舵机一个值 / One value per motor
+                形状 (Shape): (len(motor_names),) when ndarray
+                对于位置数据,应提供校准后的度数或百分比
+                For position data, should provide calibrated degrees or percentages
+
+            motor_names (str | list[str] | None):
+                要写入的舵机名称列表 / Motor names to write
+                None 表示写入所有舵机 / None means write to all motors
+                示例 (Example): ["shoulder", "elbow"] 或 "gripper"
+
+        返回值 (Returns):
+            None
+
+        异常 (Raises):
+            RobotDeviceNotConnectedError: 如果未连接 / If not connected
+            ConnectionError: 如果通信失败 / If communication fails
+
+        使用示例 (Usage Example):
+            ```python
+            # 写入相同位置到所有舵机 / Write same position to all motors
+            motors_bus.write("Goal_Position", 0.0)  # 所有舵机移动到0度 / All motors to 0 degrees
+
+            # 写入不同位置到特定舵机 / Write different positions to specific motors
+            positions = np.array([10.0, 20.0])  # 度数 / degrees
+            motors_bus.write("Goal_Position", positions, ["shoulder", "elbow"])
+
+            # 启用所有舵机扭矩 / Enable torque for all motors
+            motors_bus.write("Torque_Enable", 1)
+            ```
+
+        性能说明 (Performance Notes):
+            - 首次写入会创建 GroupSyncWrite 对象并缓存
+            - 后续写入复用缓存的对象,提高效率
+            - 写入操作是非阻塞的,不等待舵机到达目标位置
+
+            - First write creates GroupSyncWrite object and caches it
+            - Subsequent writes reuse cached object for efficiency
+            - Write operation is non-blocking, doesn't wait for goal reach
+        """
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
                 f"DynamixelMotorsBus({self.port}) is not connected. You need to run `motors_bus.connect()`."

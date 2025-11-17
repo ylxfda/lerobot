@@ -13,6 +13,59 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+训练脚本 (Training Script)
+
+功能说明 (Functionality):
+    LeRobot 的主训练脚本,用于训练模仿学习策略。
+    Main training script for LeRobot, used to train imitation learning policies.
+
+核心功能 (Core Features):
+    1. 数据加载 (Data Loading): 从数据集加载训练数据
+    2. 模型训练 (Model Training): 训练策略网络
+    3. 梯度裁剪 (Gradient Clipping): 防止梯度爆炸
+    4. 混合精度训练 (Mixed Precision): AMP 加速训练
+    5. 学习率调度 (LR Scheduling): 动态调整学习率
+    6. 检查点保存 (Checkpointing): 定期保存模型状态
+    7. 在线评估 (Online Evaluation): 在仿真环境中评估策略
+    8. 日志记录 (Logging): 记录训练指标到 WandB
+
+训练流程 (Training Pipeline):
+    1. 加载配置和数据集 / Load configuration and dataset
+    2. 创建策略模型 / Create policy model
+    3. 设置优化器和调度器 / Setup optimizer and scheduler
+    4. 训练循环 / Training loop:
+       a. 从数据集采样批次 / Sample batch from dataset
+       b. 前向传播计算损失 / Forward pass to compute loss
+       c. 反向传播更新参数 / Backward pass to update parameters
+       d. 记录训练指标 / Log training metrics
+       e. 定期评估和保存 / Periodic evaluation and checkpoint saving
+    5. 保存最终模型 / Save final model
+
+使用示例 (Usage Example):
+    ```bash
+    # 基本训练 / Basic training
+    python lerobot/scripts/train.py \\
+        dataset.repo_id=lerobot/pusht \\
+        policy=diffusion \\
+        output_dir=outputs/pusht_diffusion
+
+    # 恢复训练 / Resume training
+    python lerobot/scripts/train.py \\
+        config_path=outputs/pusht_diffusion/checkpoints/last/train_config.json \\
+        resume=true
+
+    # 使用配置文件 / Use configuration file
+    python lerobot/scripts/train.py --config-path=./configs/default.yaml
+    ```
+
+命令行参数 (Command-line Arguments):
+    通过 draccus 自动从 TrainPipelineConfig 生成
+    支持通过点号访问嵌套配置,如 policy.chunk_size=16
+    Automatically generated from TrainPipelineConfig via draccus
+    Supports dot notation for nested configs, e.g., policy.chunk_size=16
+"""
+
 import logging
 import time
 from contextlib import nullcontext
@@ -64,38 +117,115 @@ def update_policy(
     use_amp: bool = False,
     lock=None,
 ) -> tuple[MetricsTracker, dict]:
+    """
+    执行单次策略更新步骤 (Perform Single Policy Update Step)
+
+    功能说明 (Functionality):
+        执行完整的训练迭代:前向传播、反向传播、梯度裁剪、参数更新。
+        支持混合精度训练和梯度缩放。
+
+        Performs complete training iteration: forward pass, backward pass,
+        gradient clipping, parameter update. Supports mixed precision and gradient scaling.
+
+    参数说明 (Parameters):
+        train_metrics (MetricsTracker):
+            训练指标跟踪器,用于记录损失和其他指标
+            Training metrics tracker for logging loss and other metrics
+
+        policy (PreTrainedPolicy):
+            要训练的策略模型 / Policy model to train
+            形状 (Shape): 模型参数 / Model parameters
+
+        batch (Any):
+            训练批次数据,通常包含观测和动作
+            Training batch data, typically contains observations and actions
+            结构 (Structure): {"observation.state": Tensor, "action": Tensor, ...}
+
+        optimizer (Optimizer):
+            PyTorch 优化器(如 Adam, AdamW) / PyTorch optimizer (e.g., Adam, AdamW)
+
+        grad_clip_norm (float):
+            梯度裁剪的最大范数,防止梯度爆炸
+            Maximum norm for gradient clipping, prevents gradient explosion
+            典型值 (Typical value): 1.0, 10.0
+
+        grad_scaler (GradScaler):
+            梯度缩放器,用于混合精度训练
+            Gradient scaler for mixed precision training
+
+        lr_scheduler (Optional):
+            学习率调度器,每步更新学习率 / LR scheduler, updates LR each step
+
+        use_amp (bool):
+            是否使用自动混合精度训练 / Whether to use automatic mixed precision
+            默认值 (Default): False
+
+        lock (Optional):
+            多进程训练时的锁机制 / Lock for multi-process training
+
+    返回值 (Returns):
+        tuple[MetricsTracker, dict]:
+            - 更新后的指标跟踪器 / Updated metrics tracker
+            - 输出字典,包含额外信息 / Output dict with additional info
+
+    训练步骤 (Training Steps):
+        1. 前向传播:计算损失 / Forward pass: compute loss
+        2. 反向传播:计算梯度 / Backward pass: compute gradients
+        3. 梯度裁剪:限制梯度大小 / Gradient clipping: limit gradient magnitude
+        4. 参数更新:应用梯度 / Parameter update: apply gradients
+        5. 学习率更新:调整学习率 / LR update: adjust learning rate
+    """
     start_time = time.perf_counter()
+    # 获取模型设备(CPU/CUDA) / Get model device (CPU/CUDA)
     device = get_device_from_parameters(policy)
+
+    # 设置为训练模式(启用 dropout 等) / Set to training mode (enable dropout, etc.)
     policy.train()
+
+    # 前向传播:使用混合精度(如果启用) / Forward pass: use mixed precision (if enabled)
     with torch.autocast(device_type=device.type) if use_amp else nullcontext():
+        # 计算损失和输出字典 / Compute loss and output dictionary
         loss, output_dict = policy.forward(batch)
         # TODO(rcadene): policy.unnormalize_outputs(out_dict)
+
+    # 缩放损失并反向传播 / Scale loss and backpropagate
     grad_scaler.scale(loss).backward()
 
-    # Unscale the gradient of the optimizer's assigned params in-place **prior to gradient clipping**.
+    # 在梯度裁剪之前取消缩放优化器参数的梯度
+    # Unscale gradients of optimizer's assigned params **prior to gradient clipping**
     grad_scaler.unscale_(optimizer)
 
+    # 梯度裁剪:限制梯度范数以防止梯度爆炸
+    # Gradient clipping: limit gradient norm to prevent gradient explosion
     grad_norm = torch.nn.utils.clip_grad_norm_(
         policy.parameters(),
         grad_clip_norm,
-        error_if_nonfinite=False,
+        error_if_nonfinite=False,  # 如果梯度包含 inf/NaN,不抛出错误 / Don't error if grad contains inf/NaN
     )
 
-    # Optimizer's gradients are already unscaled, so scaler.step does not unscale them,
-    # although it still skips optimizer.step() if the gradients contain infs or NaNs.
+    # 优化器步骤:梯度已经取消缩放,scaler.step 不会再次取消缩放
+    # 但如果梯度包含 inf/NaN,仍会跳过 optimizer.step()
+    # Optimizer step: gradients already unscaled, scaler.step won't unscale again
+    # But still skips optimizer.step() if gradients contain infs or NaNs
     with lock if lock is not None else nullcontext():
         grad_scaler.step(optimizer)
-    # Updates the scale for next iteration.
+
+    # 更新下一次迭代的缩放因子 / Update scale for next iteration
     grad_scaler.update()
 
+    # 清零梯度,准备下一次迭代 / Zero gradients for next iteration
     optimizer.zero_grad()
 
-    # Step through pytorch scheduler at every batch instead of epoch
+    # 每个批次更新学习率(而不是每个 epoch)
+    # Step through learning rate scheduler at every batch (instead of epoch)
     if lr_scheduler is not None:
         lr_scheduler.step()
 
+    # 如果策略有 update 方法,调用它
+    # 例如 TDMPC 中的指数移动平均(EMA)更新
+    # If policy has update method, call it
+    # e.g., Exponential Moving Average (EMA) update in TDMPC
     if has_method(policy, "update"):
-        # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
         policy.update()
 
     train_metrics.loss = loss.item()

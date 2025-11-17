@@ -13,10 +13,50 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Action Chunking Transformer Policy
+"""
+ACT (Action Chunking Transformer) 策略实现
+ACT (Action Chunking Transformer) Policy Implementation
 
-As per Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware (https://arxiv.org/abs/2304.13705).
-The majority of changes here involve removing unused code, unifying naming, and adding helpful comments.
+论文 (Paper): Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware
+链接 (Link): https://arxiv.org/abs/2304.13705
+原始代码 (Original Code): https://github.com/tonyzhaozh/act
+
+功能说明 (Functionality):
+    ACT 是一种基于 Transformer 的模仿学习策略,专为双臂精细操作设计。
+    主要特点:
+    1. 动作分块 (Action Chunking): 一次预测多个时间步的动作序列
+    2. 视觉编码: 使用 ResNet 提取图像特征
+    3. Transformer 架构: 编码器-解码器结构处理时序信息
+    4. 时序集成 (Temporal Ensemble): 可选的动作平滑机制
+    5. CVAE (Conditional Variational AutoEncoder): 捕捉动作分布的多模态性
+
+    ACT is a Transformer-based imitation learning policy designed for bimanual fine manipulation.
+    Key features:
+    1. Action Chunking: Predicts action sequences for multiple timesteps at once
+    2. Visual Encoding: Uses ResNet for image feature extraction
+    3. Transformer Architecture: Encoder-decoder structure for temporal processing
+    4. Temporal Ensemble: Optional action smoothing mechanism
+    5. CVAE: Captures multimodality in action distributions
+
+主要组件 (Main Components):
+    ACTPolicy: 主策略类,包含归一化和模型封装
+    ACT: 核心 Transformer 模型
+    ACTEncoder: 视觉和状态编码器
+    ACTDecoder: 动作解码器(带 CVAE)
+    ACTTemporalEnsembler: 时序集成器
+
+代码修改 (Code Changes):
+    本实现基于原始 ACT 代码,主要改动包括:
+    - 移除未使用的代码
+    - 统一命名规范
+    - 添加详细注释
+    - 集成到 LeRobot 框架
+
+    This implementation is based on original ACT code with main changes:
+    - Removed unused code
+    - Unified naming conventions
+    - Added helpful comments
+    - Integrated into LeRobot framework
 """
 
 import math
@@ -40,12 +80,63 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 
 class ACTPolicy(PreTrainedPolicy):
     """
-    Action Chunking Transformer Policy as per Learning Fine-Grained Bimanual Manipulation with Low-Cost
-    Hardware (paper: https://arxiv.org/abs/2304.13705, code: https://github.com/tonyzhaozh/act)
+    ACT (动作分块 Transformer) 策略
+    ACT (Action Chunking Transformer) Policy
+
+    论文 (Paper): Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware
+    链接 (Link): https://arxiv.org/abs/2304.13705
+    代码 (Code): https://github.com/tonyzhaozh/act
+
+    核心思想 (Core Idea):
+        与传统的逐步预测单个动作不同,ACT 一次预测整个动作序列(chunk)。
+        这种"动作分块"方法提高了时序一致性和操作流畅性。
+
+        Unlike traditional step-by-step single action prediction, ACT predicts entire
+        action sequences (chunks) at once. This "action chunking" approach improves
+        temporal consistency and manipulation smoothness.
+
+    架构特点 (Architecture Features):
+        1. 视觉编码器 (Visual Encoder): ResNet-18 提取图像特征
+        2. 状态编码器 (State Encoder): MLP 处理机器人状态
+        3. Transformer 编码器 (Transformer Encoder): 融合视觉和状态信息
+        4. Transformer 解码器 (Transformer Decoder): 生成动作序列
+        5. CVAE 潜变量 (CVAE Latent): 捕捉多模态动作分布
+
+    输入 (Inputs):
+        - observation.images: 图像列表 / List of images
+          形状 (Shape): List of (batch_size, 3, height, width)
+        - observation.state: 机器人状态 / Robot state
+          形状 (Shape): (batch_size, state_dim)
+        - action: 动作序列(仅训练时) / Action sequence (training only)
+          形状 (Shape): (batch_size, chunk_size, action_dim)
+
+    输出 (Outputs):
+        - 预测动作序列 / Predicted action sequence
+          形状 (Shape): (batch_size, chunk_size, action_dim)
+        - 训练时还包含 KL 散度损失 / Also includes KL divergence loss during training
+
+    使用示例 (Usage Example):
+        ```python
+        from lerobot.common.policies.act.configuration_act import ACTConfig
+
+        # 创建配置 / Create configuration
+        config = ACTConfig()
+
+        # 初始化策略 / Initialize policy
+        policy = ACTPolicy(config, dataset_stats=stats)
+
+        # 训练模式 / Training mode
+        policy.train()
+        loss, loss_dict = policy.forward(batch)
+
+        # 推理模式 / Inference mode
+        policy.eval()
+        action = policy.select_action(observation)
+        ```
     """
 
-    config_class = ACTConfig
-    name = "act"
+    config_class = ACTConfig  # 配置类 / Configuration class
+    name = "act"              # 策略名称 / Policy name
 
     def __init__(
         self,
@@ -53,32 +144,111 @@ class ACTPolicy(PreTrainedPolicy):
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         """
-        Args:
-            config: Policy configuration class instance or None, in which case the default instantiation of
-                    the configuration class is used.
-            dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
-                that they will be passed with a call to `load_state_dict` before the policy is used.
+        初始化 ACT 策略 (Initialize ACT Policy)
+
+        参数说明 (Parameters):
+            config (ACTConfig):
+                策略配置实例,包含所有超参数设置。
+                如果为 None,则使用配置类的默认实例化。
+                Policy configuration instance containing all hyperparameter settings.
+                If None, uses default instantiation of the configuration class.
+
+                主要配置项 (Key Configuration Items):
+                - chunk_size: 动作块大小,一次预测的动作数 / Action chunk size, number of actions predicted at once
+                - n_action_steps: 执行的动作步数 / Number of action steps to execute
+                - input_features: 输入特征列表 / List of input features
+                - output_features: 输出特征列表 / List of output features
+                - image_features: 图像特征键名列表 / List of image feature keys
+                - hidden_dim: Transformer 隐藏维度 / Transformer hidden dimension
+                - n_encoder_layers: 编码器层数 / Number of encoder layers
+                - n_decoder_layers: 解码器层数 / Number of decoder layers
+                - latent_dim: CVAE 潜变量维度 / CVAE latent dimension
+                - temporal_ensemble_coeff: 时序集成系数(可选) / Temporal ensemble coefficient (optional)
+
+            dataset_stats (dict[str, dict[str, Tensor]] | None):
+                用于归一化的数据集统计信息。
+                结构: {feature_name: {"mean": Tensor, "std": Tensor}}
+                例如: {"observation.state": {"mean": tensor([...]), "std": tensor([...])}}
+
+                如果在此处未传入,期望在使用策略前通过 `load_state_dict` 调用传入。
+                Dataset statistics for normalization.
+                Structure: {feature_name: {"mean": Tensor, "std": Tensor}}
+                e.g., {"observation.state": {"mean": tensor([...]), "std": tensor([...])}}
+
+                If not passed here, expected to be passed via `load_state_dict` before policy is used.
+
+        初始化流程 (Initialization Flow):
+            1. 验证配置特征 / Validate configuration features
+            2. 创建输入归一化器 / Create input normalizer
+            3. 创建目标归一化器 / Create target normalizer
+            4. 创建输出反归一化器 / Create output unnormalizer
+            5. 初始化 ACT 模型 / Initialize ACT model
+            6. 如果启用,创建时序集成器 / If enabled, create temporal ensembler
+            7. 重置内部状态 / Reset internal state
         """
         super().__init__(config)
+        # 验证配置中的特征设置 / Validate feature settings in configuration
         config.validate_features()
         self.config = config
 
+        # 创建输入归一化器:将观测归一化到标准分布
+        # Create input normalizer: normalizes observations to standard distribution
         self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
+
+        # 创建目标归一化器:将动作归一化(用于训练)
+        # Create target normalizer: normalizes actions (for training)
         self.normalize_targets = Normalize(
             config.output_features, config.normalization_mapping, dataset_stats
         )
+
+        # 创建输出反归一化器:将预测的归一化动作还原到原始空间
+        # Create output unnormalizer: converts predicted normalized actions back to original space
         self.unnormalize_outputs = Unnormalize(
             config.output_features, config.normalization_mapping, dataset_stats
         )
 
+        # 初始化核心 ACT 模型 / Initialize core ACT model
         self.model = ACT(config)
 
+        # 如果配置了时序集成,创建时序集成器
+        # If temporal ensemble is configured, create temporal ensembler
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
 
+        # 重置内部状态(动作队列或集成器)
+        # Reset internal state (action queue or ensembler)
         self.reset()
 
     def get_optim_params(self) -> dict:
+        """
+        获取优化器参数组 (Get Optimizer Parameter Groups)
+
+        功能说明 (Functionality):
+            返回两个参数组,为 backbone 和其他部分设置不同的学习率。
+            这允许对预训练的视觉编码器使用较小的学习率进行微调。
+
+            Returns two parameter groups with different learning rates for backbone and other parts.
+            This allows fine-tuning the pretrained visual encoder with a smaller learning rate.
+
+        返回值 (Returns):
+            list[dict]: 参数组列表 / List of parameter groups
+                [
+                    {
+                        "params": 非 backbone 参数列表,使用默认学习率
+                                 List of non-backbone parameters, uses default learning rate
+                    },
+                    {
+                        "params": backbone 参数列表,
+                                 List of backbone parameters
+                        "lr": backbone 专用学习率 (通常较小)
+                             Backbone-specific learning rate (typically smaller)
+                    }
+                ]
+
+        注意 (Note):
+            TODO: 当前 lr_backbone == lr,考虑是否简化为 `return self.parameters()`
+            TODO: Currently lr_backbone == lr, consider simplifying to `return self.parameters()`
+        """
         # TODO(aliberts, rcadene): As of now, lr_backbone == lr
         # Should we remove this and just `return self.parameters()`?
         return [

@@ -13,7 +13,112 @@
 # limitations under the License.
 
 """
-This file contains utilities for recording frames from Intel Realsense cameras.
+Intel RealSense 相机控制模块 (Intel RealSense Camera Control Module)
+
+功能说明 (Functionality):
+    实现 Intel RealSense 深度相机的图像和深度数据采集。
+    支持RGB彩色图像、深度图、以及两者的对齐。
+
+    Implements image and depth data capture for Intel RealSense depth cameras.
+    Supports RGB color images, depth maps, and alignment between them.
+
+主要特性 (Key Features):
+    1. RGB + 深度采集 (RGB + Depth Capture): 同时获取彩色和深度信息
+    2. 序列号识别 (Serial Number ID): 支持多相机场景
+    3. 硬件重置 (Hardware Reset): 自动恢复相机状态
+    4. 异步读取 (Async Read): 后台线程持续采集
+
+核心类 (Core Classes):
+    - IntelRealSenseCamera: RealSense 相机控制类 / RealSense camera control class
+    - find_cameras(): 发现连接的 RealSense 相机 / Discover connected RealSense cameras
+
+支持型号 (Supported Models):
+    - D405, D415, D435, D435i, D455: 常见深度相机型号
+    - L515: 激光雷达深度相机 / LiDAR depth camera
+
+使用示例 (Usage Example):
+    ```python
+    from lerobot.common.robot_devices.cameras.intelrealsense import IntelRealSenseCamera, find_cameras
+    from lerobot.common.robot_devices.cameras.configs import IntelRealSenseCameraConfig
+
+    # 发现相机 / Find cameras
+    cameras = find_cameras()
+    # [{'serial_number': 128422271347, 'name': 'Intel RealSense D405'}, ...]
+
+    # 创建相机实例(仅RGB) / Create camera (RGB only)
+    config = IntelRealSenseCameraConfig(
+        serial_number=128422271347,
+        fps=30,
+        width=640,
+        height=480,
+        use_depth=False
+    )
+    camera = IntelRealSenseCamera(config)
+    camera.connect()
+
+    # 读取RGB图像 / Read RGB image
+    image = camera.read()  # shape: (480, 640, 3), dtype: uint8
+
+    camera.disconnect()
+    ```
+
+深度图示例 (Depth Map Example):
+    ```python
+    # 创建相机实例(RGB + 深度) / Create camera (RGB + Depth)
+    config = IntelRealSenseCameraConfig(
+        serial_number=128422271347,
+        fps=30,
+        width=640,
+        height=480,
+        use_depth=True  # 启用深度图 / Enable depth
+    )
+    camera = IntelRealSenseCamera(config)
+    camera.connect()
+
+    # 读取RGB图像(深度信息在后台采集) / Read RGB (depth captured in background)
+    color_image = camera.read()  # shape: (480, 640, 3)
+
+    # 深度图保存在内部缓冲区,可用于后处理
+    # Depth map stored in internal buffer, available for post-processing
+    ```
+
+多相机示例 (Multi-Camera Example):
+    ```python
+    # 发现所有相机 / Find all cameras
+    camera_infos = find_cameras()
+
+    # 为每个相机创建实例 / Create instance for each camera
+    cameras = []
+    for cam_info in camera_infos:
+        config = IntelRealSenseCameraConfig(
+            serial_number=cam_info['serial_number'],
+            fps=30,
+            width=640,
+            height=480
+        )
+        camera = IntelRealSenseCamera(config)
+        camera.connect()
+        cameras.append(camera)
+
+    # 同步采集所有相机 / Synchronously capture all cameras
+    images = [cam.async_read() for cam in cameras]
+    ```
+
+深度数据格式 (Depth Data Format):
+    - 深度值单位: 毫米(mm) / Depth values in millimeters (mm)
+    - 数据类型: uint16 / Data type: uint16
+    - 范围: 取决于具体型号 / Range depends on specific model
+      - D405: ~70mm - ~1200mm (近距离 / Short range)
+      - D435: ~200mm - ~10000mm (远距离 / Long range)
+
+注意事项 (Notes):
+    - 需要安装 librealsense 和 pyrealsense2
+    - 首次连接可能需要固件更新
+    - 使用 force_hardware_reset=True 可解决多数连接问题
+
+    - Requires librealsense and pyrealsense2 installation
+    - First connection may require firmware update
+    - Using force_hardware_reset=True resolves most connection issues
 """
 
 import argparse

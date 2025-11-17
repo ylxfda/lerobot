@@ -11,6 +11,59 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Feetech 舵机总线控制模块 (Feetech Motor Bus Control Module)
+
+功能说明 (Functionality):
+    实现与 Feetech 系列舵机(如 STS3215)的底层通信和控制。
+    Feetech 是一种经济实惠的智能舵机,常用于成本敏感的机器人项目。
+
+    Implements low-level communication and control for Feetech series motors (e.g., STS3215).
+    Feetech motors are cost-effective smart servos commonly used in cost-sensitive robot projects.
+
+主要特点 (Key Features):
+    1. 与 Dynamixel 类似的 API 接口 / Similar API interface to Dynamixel
+    2. 使用 scservo_sdk 进行通信 / Uses scservo_sdk for communication
+    3. 支持位置校准和批量操作 / Supports position calibration and batch operations
+    4. 旋转重置检测 / Rotation reset detection (avoid_rotation_reset)
+
+支持型号 (Supported Models):
+    - STS3215: 标准舵机 / Standard motor
+    - SCS 系列: 其他兼容型号 / Other compatible models
+
+关键区别 (Key Differences from Dynamixel):
+    1. 使用 scservo_sdk 而非 dynamixel_sdk / Uses scservo_sdk instead of dynamixel_sdk
+    2. Protocol Version 0 (Dynamixel 使用 2.0 / Dynamixel uses 2.0)
+    3. 不同的 Control Table 结构 / Different Control Table structure
+    4. 需要处理旋转重置问题(位置从4095跳到0) / Needs to handle rotation reset (position jumps from 4095 to 0)
+
+使用示例 (Usage Example):
+    ```python
+    from lerobot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
+    from lerobot.common.robot_devices.motors.feetech import FeetechMotorsBus
+
+    config = FeetechMotorsBusConfig(
+        port="/dev/ttyUSB0",
+        motors={"joint1": (1, "sts3215"), "joint2": (2, "sts3215")}
+    )
+
+    motors_bus = FeetechMotorsBus(config)
+    motors_bus.connect()
+
+    # 读取和写入位置 / Read and write position
+    positions = motors_bus.read("Present_Position")
+    motors_bus.write("Goal_Position", positions + 10.0)
+
+    motors_bus.disconnect()
+    ```
+
+注意事项 (Notes):
+    - Feetech 舵机需要更多的通信重试次数(20次 vs Dynamixel 的10次)
+    - 需要特别处理位置值在0和4095之间的跳变(旋转重置)
+
+    - Feetech motors need more communication retries (20 vs 10 for Dynamixel)
+    - Need special handling for position jumps between 0 and 4095 (rotation reset)
+"""
 
 import enum
 import logging
@@ -247,42 +300,55 @@ class JointOutOfRangeError(Exception):
 
 class FeetechMotorsBus:
     """
-    The FeetechMotorsBus class allows to efficiently read and write to the attached motors. It relies on
-    the python feetech sdk to communicate with the motors. For more info, see the [feetech SDK Documentation](https://emanual.robotis.com/docs/en/software/feetech/feetech_sdk/sample_code/python_read_write_protocol_2_0/#python-read-write-protocol-20).
+    Feetech 舵机总线管理类 (Feetech Motor Bus Manager Class)
 
-    A FeetechMotorsBus instance requires a port (e.g. `FeetechMotorsBus(port="/dev/tty.usbmodem575E0031751"`)).
-    To find the port, you can run our utility script:
-    ```bash
-    python lerobot/scripts/find_motors_bus_port.py
-    >>> Finding all available ports for the MotorsBus.
-    >>> ['/dev/tty.usbmodem575E0032081', '/dev/tty.usbmodem575E0031751']
-    >>> Remove the usb cable from your FeetechMotorsBus and press Enter when done.
-    >>> The port of this FeetechMotorsBus is /dev/tty.usbmodem575E0031751.
-    >>> Reconnect the usb cable.
-    ```
+    功能说明 (Functionality):
+        管理连接到一个串口的多个 Feetech 舵机。
+        提供与 DynamixelMotorsBus 类似的 API 接口。
 
-    Example of usage for 1 motor connected to the bus:
-    ```python
-    motor_name = "gripper"
-    motor_index = 6
-    motor_model = "sts3215"
+        Manages multiple Feetech motors connected to a single serial port.
+        Provides similar API interface as DynamixelMotorsBus.
 
-    config = FeetechMotorsBusConfig(
-        port="/dev/tty.usbmodem575E0031751",
-        motors={motor_name: (motor_index, motor_model)},
-    )
-    motors_bus = FeetechMotorsBus(config)
-    motors_bus.connect()
+    核心特性 (Core Features):
+        1. 批量同步读写 (Batch Sync Read/Write)
+        2. 位置校准 (Position Calibration)
+        3. 旋转重置检测 (Rotation Reset Detection): 处理位置跳变
+        4. 自动重试和错误处理 (Auto Retry and Error Handling)
 
-    position = motors_bus.read("Present_Position")
+    属性说明 (Attributes):
+        port (str): 串口路径 / Serial port path
+        motors (dict): 舵机配置 / Motor configuration
+        calibration (dict | None): 校准参数 / Calibration parameters
+        track_positions (dict): 位置跟踪(用于检测旋转重置) / Position tracking (for rotation reset detection)
 
-    # move from a few motor steps as an example
-    few_steps = 30
-    motors_bus.write("Goal_Position", position + few_steps)
+    使用示例 (Usage Example):
+        ```python
+        motor_name = "gripper"
+        motor_index = 6
+        motor_model = "sts3215"
 
-    # when done, consider disconnecting
-    motors_bus.disconnect()
-    ```
+        config = FeetechMotorsBusConfig(
+            port="/dev/tty.usbmodem575E0031751",
+            motors={motor_name: (motor_index, motor_model)},
+        )
+        motors_bus = FeetechMotorsBus(config)
+        motors_bus.connect()
+
+        position = motors_bus.read("Present_Position")
+
+        # 移动几个舵机步数作为示例 / Move a few motor steps as example
+        few_steps = 30
+        motors_bus.write("Goal_Position", position + few_steps)
+
+        # 完成后断开连接 / Disconnect when done
+        motors_bus.disconnect()
+        ```
+
+    与 Dynamixel 的区别 (Differences from Dynamixel):
+        - 使用 scservo_sdk 而非 dynamixel_sdk / Uses scservo_sdk not dynamixel_sdk
+        - 需要 avoid_rotation_reset() 处理位置跳变 / Needs avoid_rotation_reset() for position jumps
+        - 更高的重试次数(NUM_READ_RETRY=20) / Higher retry count (NUM_READ_RETRY=20)
+        - 需要清空串口缓冲区 / Needs to flush serial buffer
     """
 
     def __init__(
